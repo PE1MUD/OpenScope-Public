@@ -443,7 +443,7 @@ OpenScope-deploy/
 // Leave out some local stuffs
 BackupOpenScope.bat
 deploy.bat
-docs/
+docs/**/*.md
 commit.txt
 *.zip
 
