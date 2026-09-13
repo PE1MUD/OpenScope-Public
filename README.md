@@ -32,6 +32,20 @@ OpenScope currently targets Blackmagic Design capture hardware through the DeckL
 
 The application is designed to remain usable when no Blackmagic driver or device is available, so non-capture functionality can still be accessed.
 
+## Blackmagic Desktop Video driver
+
+OpenScope uses Blackmagic Design DeckLink / Intensity capture hardware through the DeckLink API.
+
+To use Blackmagic capture hardware, install the current **Blackmagic Desktop Video** software and driver package first.
+
+Download it from Blackmagic Design:
+
+https://www.blackmagicdesign.com/support
+
+The Desktop Video package installs the required device drivers and the Desktop Video Setup utility.
+
+OpenScope can still start without the Blackmagic driver installed, but Blackmagic capture devices will not be available.
+
 ## PCM audio
 
 OpenScope can decode PCM embedded in video, including Sony PCM-F1 / EIAJ-style signals and Ham PCM 2.0.
