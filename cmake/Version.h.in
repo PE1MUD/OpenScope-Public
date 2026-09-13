@@ -1,0 +1,4 @@
+#pragma once
+
+#define OPENSCOPE_VERSION "@PROJECT_VERSION@"
+#define OPENSCOPE_DELTA "@OPENSCOPE_DELTA@"

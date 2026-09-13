@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/branding">
+        <file alias="OpenScopeLogo.png">../assets/OpenScopeLogo.png</file>
+        <file alias="OpenScopeAboutLogo.png">../assets/OpenScopeAboutLogo.png</file>
+    </qresource>
+</RCC>

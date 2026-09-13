@@ -1,0 +1,3 @@
+#include <windows.h>
+
+IDI_OPENSCOPE_APP_ICON ICON "@OPENSCOPE_ICON_FILE@"
