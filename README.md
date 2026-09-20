@@ -2,9 +2,9 @@
 
 OpenScope is a Windows-based software waveform monitor, vectorscope and video analysis toolbox focused on PAL/625-line SD video.
 
-The current public baseline is **OpenScope 0.9.5**.
+The current public baseline is **OpenScope 0.9.6**.
 
-![OpenScope 0.9.5 main workspace](docs/images/openscope-main.png)
+![OpenScope 0.9.6 main workspace](docs/images/openscope-main.png)
 
 OpenScope can combine live video, waveform, vectorscope and configuration or PCM-audio views in a four-panel workspace.
 
