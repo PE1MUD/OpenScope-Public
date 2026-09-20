@@ -13,6 +13,7 @@
 #include "standards/VideoStandard.h"
 #include "output/SpoutOutput.h"
 #include "sources/philips/PhilipsPatternRomSource.h"
+#include "video/Yuv444Frame.h"
 #include "diagnostics/TraceLog.h"
 
 #ifndef NOMINMAX
@@ -34,6 +35,11 @@
 #include <QActionGroup>
 #include <QMenu>
 #include <QMenuBar>
+#include <QImageReader>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QUrl>
 
 #include <memory>
 #include <QFileDialog>
@@ -55,6 +61,171 @@
 
 namespace
 {
+constexpr int kImagePalWidth = 720;
+constexpr int kImagePalHeight = 576;
+
+// PAL D1 pixels are slightly wider than square pixels when shown as 4:3.
+// (4/3) / (720/576) = 16/15.
+constexpr double kPalPixelAspectRatio = 16.0 / 15.0;
+
+std::uint16_t expand8To16Image(int value)
+{
+    return static_cast<std::uint16_t>(
+        std::clamp(value, 0, 255) * 257);
+}
+
+QImage imageToPalRaster(const QImage& source)
+{
+    // Native PAL raster: keep every pixel exactly as supplied.
+    if (source.width() == kImagePalWidth &&
+        source.height() == kImagePalHeight)
+    {
+        return source.convertToFormat(QImage::Format_RGB888);
+    }
+
+    // OpenScope still-image export:
+    // video raster is exported at 4x linear resolution to retain detail.
+    // Reduce exactly 4:1, without smoothing and without any extra aspect
+    // correction. This preserves the round-trip raster geometry and avoids
+    // low-pass filtering of multiburst/high-frequency detail.
+    if (source.width() == kImagePalWidth * 4 &&
+        source.height() == kImagePalHeight * 4)
+    {
+        return source.scaled(
+            kImagePalWidth,
+            kImagePalHeight,
+            Qt::IgnoreAspectRatio,
+            Qt::FastTransformation)
+            .convertToFormat(QImage::Format_RGB888);
+    }
+
+    // General still image:
+    // fit directly into PAL raster space, accounting for PAL's 16:15
+    // display pixel aspect. There is only ONE resize operation.
+    const double sourceAspect =
+        static_cast<double>(source.width()) /
+        static_cast<double>(source.height());
+
+    const double targetRasterAspect =
+        sourceAspect / kPalPixelAspectRatio;
+
+    int targetWidth = kImagePalWidth;
+    int targetHeight =
+        static_cast<int>(
+            std::lround(
+                static_cast<double>(targetWidth) /
+                targetRasterAspect));
+
+    if (targetHeight > kImagePalHeight)
+    {
+        targetHeight = kImagePalHeight;
+        targetWidth =
+            static_cast<int>(
+                std::lround(
+                    static_cast<double>(targetHeight) *
+                    targetRasterAspect));
+    }
+
+    targetWidth = std::clamp(targetWidth, 1, kImagePalWidth);
+    targetHeight = std::clamp(targetHeight, 1, kImagePalHeight);
+
+    QImage palRaster(
+        kImagePalWidth,
+        kImagePalHeight,
+        QImage::Format_RGB888);
+    palRaster.fill(Qt::black);
+
+    const QImage scaled =
+        source.scaled(
+            targetWidth,
+            targetHeight,
+            Qt::IgnoreAspectRatio,
+            Qt::FastTransformation)
+            .convertToFormat(QImage::Format_RGB888);
+
+    QPainter painter(&palRaster);
+    const QPoint topLeft(
+        (kImagePalWidth - targetWidth) / 2,
+        (kImagePalHeight - targetHeight) / 2);
+    painter.drawImage(topLeft, scaled);
+
+    return palRaster;
+}
+
+bool imageToPalYuv444(
+    const QString& fileName,
+    Yuv444Frame& destination,
+    QString* errorMessage,
+    QSize* sourceImageSize)
+{
+    QImageReader reader(fileName);
+    reader.setAutoTransform(true);
+
+    QImage source = reader.read();
+    if (source.isNull())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage =
+                QObject::tr("Could not open image:\n%1\n\n%2")
+                    .arg(fileName, reader.errorString());
+        }
+        return false;
+    }
+
+    if (sourceImageSize != nullptr)
+    {
+        *sourceImageSize = source.size();
+    }
+
+    source = source.convertToFormat(QImage::Format_RGB888);
+    const QImage palRgb = imageToPalRaster(source);
+
+    destination.resize(kImagePalWidth, kImagePalHeight);
+    destination.sampleClockHz = 13'500'000.0;
+    destination.inputSignalValid = true;
+
+    for (int y = 0; y < kImagePalHeight; ++y)
+    {
+        const uchar* line = palRgb.constScanLine(y);
+        const std::size_t rowOffset =
+            static_cast<std::size_t>(y) * kImagePalWidth;
+
+        for (int x = 0; x < kImagePalWidth; ++x)
+        {
+            const int r = line[x * 3 + 0];
+            const int g = line[x * 3 + 1];
+            const int b = line[x * 3 + 2];
+
+            // Existing BT.601 studio-range RGB -> YCbCr conversion.
+            // Deliberately unchanged.
+            const int yy =
+                std::clamp(
+                    ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16,
+                    16,
+                    235);
+            const int uu =
+                std::clamp(
+                    ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128,
+                    16,
+                    240);
+            const int vv =
+                std::clamp(
+                    ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128,
+                    16,
+                    240);
+
+            const std::size_t index =
+                rowOffset + static_cast<std::size_t>(x);
+            destination.y[index] = expand8To16Image(yy);
+            destination.u[index] = expand8To16Image(uu);
+            destination.v[index] = expand8To16Image(vv);
+        }
+    }
+
+    return true;
+}
+
 QSize devicePixelRenderSize(
     const QWidget* widget,
     int logicalWidth,
@@ -316,6 +487,21 @@ MainWindow::MainWindow(QWidget* parent)
     }
 
     createSourceMenu();
+
+    imageSourceTimer_ =
+        new QTimer(this);
+    imageSourceTimer_->setTimerType(Qt::PreciseTimer);
+    imageSourceTimer_->setInterval(40);
+    connect(
+        imageSourceTimer_,
+        &QTimer::timeout,
+        this,
+        [this]()
+        {
+            publishImageFrame();
+        });
+
+    setAcceptDrops(true);
 
     // The saved width is the Qt client width.  Once the menu bar and central
     // workspace exist, normalize the initial height so the workspace itself
@@ -1472,6 +1658,7 @@ MainWindow::MainWindow(QWidget* parent)
         initialSettings.control.pcmAudio.deEmphasisMode);
 
     videoEngine_->setLumaCompensationEnabled(
+        blackmagicSourceActive_ &&
         initialSettings.control
             .processing
             .lumaCompensation
@@ -2385,7 +2572,7 @@ MainWindow::MainWindow(QWidget* parent)
                 });
 
             videoEngine_->setLumaCompensationEnabled(
-                enabled);
+                blackmagicSourceActive_ && enabled);
         });
 
     connect(
@@ -2797,6 +2984,13 @@ void MainWindow::createSourceMenu()
     sourceGroup_->addAction(
         philipsPatternRomSourceAction_);
 
+    imageFileSourceAction_ =
+        sourceMenu->addAction(
+            tr("Image file..."));
+    imageFileSourceAction_->setCheckable(true);
+    sourceGroup_->addAction(
+        imageFileSourceAction_);
+
     sourceMenu->addSeparator();
 
     reloadPhilipsPatternRomAction_ =
@@ -2812,6 +3006,15 @@ void MainWindow::createSourceMenu()
         [this]()
         {
             selectPhilipsPatternRomSource();
+        });
+
+    connect(
+        imageFileSourceAction_,
+        &QAction::triggered,
+        this,
+        [this]()
+        {
+            selectImageFileSource();
         });
 
     connect(
@@ -2901,10 +3104,22 @@ void MainWindow::selectBlackmagicSource(
     {
         philipsPatternRomSource_->stop();
     }
+    if (imageSourceTimer_ != nullptr)
+    {
+        imageSourceTimer_->stop();
+    }
 
     waveformWidget_->setInputSampleClockHz(13'500'000.0);
     ySpectrumWindow_->setSnrMeasurementEnabled(true);
     waveformWidget_->setSnrMeasurementEnabled(true);
+
+    blackmagicSourceActive_ = true;
+    videoEngine_->setLumaCompensationEnabled(
+        settingsService_->settings()
+            .control
+            .processing
+            .lumaCompensation
+            .enabled);
 
     deckLinkStop();
     setBlackmagicDeviceName(
@@ -3036,6 +3251,14 @@ void MainWindow::selectPhilipsPatternRomSource()
         }
         ySpectrumWindow_->setSnrMeasurementEnabled(true);
         waveformWidget_->setSnrMeasurementEnabled(true);
+        blackmagicSourceActive_ = true;
+        videoEngine_->setLumaCompensationEnabled(
+                settingsService_->settings()
+                        .control
+                        .processing
+                        .lumaCompensation
+                        .enabled);
+
         deckLinkStop();
         setBlackmagicDeviceName(
             deckLinkProbe(videoEngine_, selectedBlackmagicDeviceIndex_));
@@ -3054,6 +3277,14 @@ void MainWindow::selectPhilipsPatternRomSource()
         false,
         QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
     waveformWidget_->setSnrMeasurementEnabled(false);
+
+    if (imageSourceTimer_ != nullptr)
+    {
+        imageSourceTimer_->stop();
+    }
+
+    blackmagicSourceActive_ = false;
+    videoEngine_->setLumaCompensationEnabled(false);
 
     deckLinkStop();
 
@@ -3097,6 +3328,148 @@ void MainWindow::selectPhilipsPatternRomSource()
     reloadPhilipsPatternRomAction_->setEnabled(true);
 }
 
+void MainWindow::selectImageFileSource()
+{
+    const QString settingsFileName =
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("OpenScope.ini"));
+    QSettings settings(settingsFileName, QSettings::IniFormat);
+
+    QString initialPath =
+        settings.value(
+            QStringLiteral("Local/ImageFile/LastPath"),
+            QCoreApplication::applicationDirPath())
+            .toString();
+
+    const QString fileName =
+        QFileDialog::getOpenFileName(
+            this,
+            tr("Open image"),
+            initialPath,
+            tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;All files (*.*)"));
+
+    if (fileName.isEmpty())
+    {
+        if (imageSourceTimer_ != nullptr && imageSourceTimer_->isActive())
+        {
+            imageFileSourceAction_->setChecked(true);
+        }
+        else if (philipsPatternRomSource_ != nullptr && philipsPatternRomSource_->isRunning())
+        {
+            philipsPatternRomSourceAction_->setChecked(true);
+        }
+        else if (blackmagicSourceAction_ != nullptr)
+        {
+            blackmagicSourceAction_->setChecked(true);
+        }
+        return;
+    }
+
+    openImageFile(fileName);
+}
+
+bool MainWindow::openImageFile(const QString& fileName)
+{
+    auto newFrame = std::make_unique<Yuv444Frame>();
+    QString errorMessage;
+    QSize sourceImageSize;
+
+    if (!imageToPalYuv444(
+            fileName,
+            *newFrame,
+            &errorMessage,
+            &sourceImageSize))
+    {
+        QMessageBox::warning(
+            this,
+            tr("Image file"),
+            errorMessage);
+        return false;
+    }
+
+    if (philipsPatternRomSource_ != nullptr)
+    {
+        philipsPatternRomSource_->stop();
+    }
+    deckLinkStop();
+
+    blackmagicSourceActive_ = false;
+    videoEngine_->setLumaCompensationEnabled(false);
+
+    imageSourceFrame_ = std::move(newFrame);
+    imageSourceFileName_ = fileName;
+
+    waveformWidget_->setInputSampleClockHz(13'500'000.0);
+    ySpectrumWindow_->setSnrMeasurementEnabled(
+        false,
+        QStringLiteral("STILL IMAGE SOURCE   SNR not applicable"));
+    waveformWidget_->setSnrMeasurementEnabled(false);
+
+    if (workspace_ != nullptr)
+    {
+        workspace_->setCompositeInputGainState(
+            false, false, 0, 0, 0, 0);
+    }
+
+    const QString settingsFileName =
+        QDir(QCoreApplication::applicationDirPath())
+            .filePath(QStringLiteral("OpenScope.ini"));
+    QSettings settings(settingsFileName, QSettings::IniFormat);
+    settings.setValue(
+        QStringLiteral("Local/ImageFile/LastPath"),
+        QFileInfo(fileName).absolutePath());
+
+    VectorscopePresentationInfo vectorscopePresentation;
+    vectorscopePresentation.source = QStringLiteral("Image");
+    vectorscopePresentation.input =
+        sourceImageSize.isValid()
+        ? QStringLiteral("%1x%2")
+            .arg(sourceImageSize.width())
+            .arg(sourceImageSize.height())
+        : QStringLiteral("IMAGE");
+    vectorscopePresentation.standard = QStringLiteral("625/50d");
+    vectorscopePresentation.targets =
+        settingsService_->settings()
+            .control.instrument.vectorscope.showHundredPercentTargets
+        ? QStringLiteral("100%")
+        : QStringLiteral("75%");
+    vectorscopePresentation.matrix = QStringLiteral("BT.601");
+    vectorscopePresentation.processing = QStringLiteral("RGB file -> YUV 4:4:4");
+    videoEngine_->setVectorscopePresentationInfo(vectorscopePresentation);
+
+    if (imageFileSourceAction_ != nullptr)
+    {
+        imageFileSourceAction_->setText(
+            tr("Image - %1").arg(QFileInfo(fileName).fileName()));
+        imageFileSourceAction_->setChecked(true);
+    }
+    if (reloadPhilipsPatternRomAction_ != nullptr)
+    {
+        reloadPhilipsPatternRomAction_->setEnabled(false);
+    }
+
+    publishImageFrame();
+    if (imageSourceTimer_ != nullptr)
+    {
+        imageSourceTimer_->start();
+    }
+    return true;
+}
+
+void MainWindow::publishImageFrame()
+{
+    if (imageSourceFrame_ == nullptr || videoEngine_ == nullptr)
+    {
+        return;
+    }
+
+    if (Yuv444Frame* destination = videoEngine_->tryAcquireWriteFrame())
+    {
+        *destination = *imageSourceFrame_;
+        videoEngine_->submitWriteFrame();
+    }
+}
+
 void MainWindow::reloadPhilipsPatternRomSource()
 {
     if (philipsPatternRomSource_ == nullptr ||
@@ -3125,6 +3498,14 @@ void MainWindow::reloadPhilipsPatternRomSource()
         }
         ySpectrumWindow_->setSnrMeasurementEnabled(true);
         waveformWidget_->setSnrMeasurementEnabled(true);
+        blackmagicSourceActive_ = true;
+        videoEngine_->setLumaCompensationEnabled(
+                settingsService_->settings()
+                        .control
+                        .processing
+                        .lumaCompensation
+                        .enabled);
+
         setBlackmagicDeviceName(
             deckLinkProbe(videoEngine_, selectedBlackmagicDeviceIndex_));
         return;
@@ -3137,6 +3518,14 @@ void MainWindow::reloadPhilipsPatternRomSource()
         false,
         QStringLiteral("DIGITAL ROM SOURCE   SNR not applicable"));
     waveformWidget_->setSnrMeasurementEnabled(false);
+
+    if (imageSourceTimer_ != nullptr)
+    {
+        imageSourceTimer_->stop();
+    }
+
+    blackmagicSourceActive_ = false;
+    videoEngine_->setLumaCompensationEnabled(false);
 
     deckLinkStop();
 
@@ -3563,6 +3952,11 @@ MainWindow::~MainWindow()
         preventDisplaySleepActive_ = false;
     }
 
+    if (imageSourceTimer_ != nullptr)
+    {
+        imageSourceTimer_->stop();
+    }
+
     if (philipsPatternRomSource_ != nullptr)
     {
         philipsPatternRomSource_->stop();
@@ -3574,6 +3968,43 @@ MainWindow::~MainWindow()
 VideoEngine* MainWindow::videoEngine() const
 {
     return videoEngine_;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event != nullptr &&
+        event->mimeData() != nullptr &&
+        event->mimeData()->hasUrls())
+    {
+        for (const QUrl& url : event->mimeData()->urls())
+        {
+            if (url.isLocalFile())
+            {
+                event->acceptProposedAction();
+                return;
+            }
+        }
+    }
+
+    QMainWindow::dragEnterEvent(event);
+}
+
+void MainWindow::dropEvent(QDropEvent* event)
+{
+    if (event != nullptr &&
+        event->mimeData() != nullptr)
+    {
+        for (const QUrl& url : event->mimeData()->urls())
+        {
+            if (url.isLocalFile() && openImageFile(url.toLocalFile()))
+            {
+                event->acceptProposedAction();
+                return;
+            }
+        }
+    }
+
+    QMainWindow::dropEvent(event);
 }
 
 bool MainWindow::nativeEvent(

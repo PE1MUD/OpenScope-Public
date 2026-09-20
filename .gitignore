@@ -447,5 +447,10 @@ docs/**/*.md
 commit.txt
 *.zip
 
+# Local developer / deployment helpers
+deploy.bat
+downloads.bat
+downloads.ps1
+
 # Leave out Philips ROM dumps
 romsets/**/*.bin

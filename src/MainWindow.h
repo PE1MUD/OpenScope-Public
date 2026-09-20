@@ -13,6 +13,9 @@
 
 class QTimer;
 class QThread;
+class QDragEnterEvent;
+class QDropEvent;
+struct Yuv444Frame;
 
 class VectorscopeWidget;
 class VideoEngine;
@@ -42,6 +45,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
     bool eventFilter(QObject* watched, QEvent* event) override;
 
@@ -79,6 +84,7 @@ private:
     PerformanceWidget* performanceWidget_ = nullptr;
     QTimer* performanceTimer_ = nullptr;
     QTimer* viewFpsTimer_ = nullptr;
+    QTimer* imageSourceTimer_ = nullptr;
     QElapsedTimer viewFpsElapsedTimer_;
 
     int videoOpenScopeFrameCount_ = 0;
@@ -107,11 +113,14 @@ private:
 
     std::unique_ptr<PhilipsPatternRomSource>
         philipsPatternRomSource_;
+    std::unique_ptr<Yuv444Frame> imageSourceFrame_;
+    QString imageSourceFileName_;
 
     QMenu* blackmagicSourceMenu_ = nullptr;
     QActionGroup* sourceGroup_ = nullptr;
     QAction* blackmagicSourceAction_ = nullptr;
     QAction* philipsPatternRomSourceAction_ = nullptr;
+    QAction* imageFileSourceAction_ = nullptr;
     QAction* reloadPhilipsPatternRomAction_ = nullptr;
     QAction* configAction_ = nullptr;
 
@@ -120,6 +129,7 @@ private:
     QSize vectorscopeRenderSize_;
     QString blackmagicDeviceName_ = QStringLiteral("BMD");
     int selectedBlackmagicDeviceIndex_ = 0;
+    bool blackmagicSourceActive_ = true;
 
     RenderView activeRenderView_ =
         RenderView::Matrix;
@@ -145,5 +155,8 @@ private:
     void refreshBlackmagicDeviceMenu();
     void selectBlackmagicSource(int deviceIndex);
     void selectPhilipsPatternRomSource();
+    void selectImageFileSource();
+    bool openImageFile(const QString& fileName);
+    void publishImageFrame();
     void reloadPhilipsPatternRomSource();
 };
